@@ -1,0 +1,247 @@
+---
+title: "Project"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+date: '2022-08-15'
+---
+
+```{r Setup}
+rm(list = ls())
+setwd("E:/Uni Bonn/Semester 2/Computational Statistics/Project")
+library(dplyr)
+library(psych)
+library(caret)
+library(haven)
+clean_outcomes_data_reshape_use <- read_dta("clean_outcomes_data_reshape_use.dta")
+df_prework <- subset(clean_outcomes_data_reshape_use, survey != "_bl") #removed the baseline survey
+df_prework$a1_age <- NULL #at the endline survey they do not have any age data collected
+df_prework$survey <- NULL #unecessary indicator variable for baseline and endline survey
+df_prework$c1_mens_yn <- NULL #collinearity problem later
+#Data Cleaning------------------
+a <- lm(df_prework$c30_mens_missedschool_yn ~ ., data = df_prework)
+#summary(a)
+true_beta <- round(unname(a$coefficients),4)[-1] #intercept deleted
+true_y  <- df_prework$c30_mens_missedschool_yn
+df_prework$c30_mens_missedschool_yn <- NULL #remove y
+pred <- describe(df_prework, fast =TRUE, ranges =FALSE ) #table put in paper?
+mu <- pred[,3]
+sd <- pred[,4]
+n <- 200
+#Simulation----------
+rep <- 50
+cv_it <- 10 #cross validation iterations
+#training insights
+RMSE_container_lasso <- c()
+RMSE_container_ols <- c()
+RMSE_container_pcr <- c()
+#test insights
+RMSE_con_lasso_test <- c()
+RMSE_con_ols_test<- c()
+RMSE_con_pcr_test<- c()
+R2_con_lasso_test<- c()
+R2_con_ols_test<- c()
+R2_con_pcr_test<- c()
+
+```
+
+```{r Simulation_Study}
+for (i in 1:rep){
+  set.seed(i+50)
+  #DGP-----------
+  mother_edu <- rnorm(n,mu[1],sd[1]) #ISSUE: cannot be negative and ganze zahl
+  father_edu <- rnorm(n,mu[2], sd[2]) #ISSUE: cannot be negative and ganze zahl
+  total_inc  <- rnorm(n,mu[3], sd[3]) #ISSUE: cannot be negative and ganze zahl
+  school_sc <- rnorm(n,mu[4], sd[4])
+  school_grade <- rnorm(n,mu[5],sd[5]) #ISSUE: ganze zahl not negative
+  wage_work <-  rbinom(n,1,mu[6]) #prob = mean
+  #mens_having <- rbinom(n,1,mu[7]) #prob = mean
+  mens_evr_pads <- rbinom(n,1,mu[7]) #prob = mean
+  mens_use_rags <- rbinom(n,1,mu[8]) #prob = mean
+  mens_use_pads <- rbinom(n,1,mu[9]) #prob = mean
+  mens_use_pads_rags <- rbinom(n,1,mu[10]) #prob = mean
+  father_hindu <- rbinom(n,1,mu[11]) #prob = mean
+  treatment <- rbinom(n,1,mu[12]) #prob = mean
+  X <- cbind(mother_edu, father_edu, total_inc, school_sc, school_grade, wage_work, 
+             mens_evr_pads, mens_use_rags, mens_use_pads, mens_use_pads_rags, father_hindu, treatment) #mens_having, is missing, put after wage work
+  eps <- rnorm(n, 0, 1) #possible self given error term
+  Y <-  X %*% true_beta + eps
+  df <- cbind(Y,X)
+  #training and test data --------
+  df <- as.data.frame(df)
+  colnames(df)[1] <- "Y"
+  partition <- createDataPartition(df$Y, p=.8, list =FALSE, times = 1)
+  training_data <- df[partition,]
+  test_data <- df[-partition,]
+  training_data <- as.data.frame(training_data)
+  crossValid <- trainControl(method = "cv", number = cv_it, savePredictions = "all")
+  #Lassso--------------
+  #lambdagrid
+  lambda_grid <- 10^seq(5, -5, length = 500)  
+  lasso_mod <- train(Y ~ .,
+                     data = training_data,
+                     preProcess = c("center","scale"),
+                     method = "glmnet",
+                     tuneGrid = expand.grid(alpha=1,lambda = lambda_grid),
+                     trControl=crossValid) #trainControl= takes the cross validation from before which "folds" the training data
+  prediction_lasso <- predict(lasso_mod, newdata = test_data) #predictions of y
+  modeltest_lasso <- postResample(prediction_lasso, test_data$Y)[-3]
+  #OLS-------------
+  ols_mod <- train(Y ~ .,
+                   data = training_data,
+                   preProcess = c("center","scale"), #not necessessary for the model
+                   method = "lm",
+                   trControl = crossValid) #resampling method, consistent with Lasso
+  #prediction_ols
+  prediction_ols <- predict(ols_mod, newdata = test_data)
+  modeltest_ols <- postResample(prediction_ols, test_data$Y)[-3]
+  #pcr------------------
+  pcr_mod <- train(Y ~ .,
+                   data = training_data,
+                   preProcess = c("center","scale","pca"),
+                   method = "lm", #correct?
+                   trControl = crossValid)
+  prediction_pcr <- predict(pcr_mod, newdata = test_data)
+  modeltest_pcr <- postResample(prediction_pcr, test_data$Y)[-3]
+  models <- list(lasso_mod,ols_mod,pcr_mod)
+  trainperform <- resamples(models) #resamples
+  #means
+  #training insights
+  #Mean MSE across variables
+  RMSE_container_lasso[i] <- mean(trainperform$values$`Model1~RMSE`)
+  RMSE_container_ols[i] <- mean(trainperform$values$`Model2~RMSE`)
+  RMSE_container_pcr[i] <- mean(trainperform$values$`Model3~RMSE`)
+  #test insights
+  RMSE_con_lasso_test[i] <- mean(modeltest_lasso[1])
+  RMSE_con_ols_test[i] <- mean(modeltest_ols[1])
+  RMSE_con_pcr_test[i] <- mean(modeltest_pcr[1])
+  R2_con_lasso_test[i] <- mean(modeltest_lasso[2])
+  R2_con_ols_test[i] <- mean(modeltest_ols[2])
+  R2_con_pcr_test[i] <- mean(modeltest_pcr[2])
+  #MSE for each variable -> Appendix RMSE of each variable
+  
+} #end of simulation
+
+```
+
+```{r Plots}
+RMSE_all_train <- cbind(RMSE_container_lasso, RMSE_container_ols, RMSE_container_pcr)
+mean(RMSE_container_lasso)
+mean(RMSE_container_ols)
+mean(RMSE_container_pcr)
+#Signifikanztests zwischen den verschiedenen Modellen machen
+#Note = 10 fold CV; Training RMSE
+boxplot(RMSE_all_train, ylab = "RMSE", xlab = "Models", main ="Fig. 1: Comparing RMSE Training Data",
+        cex.axis = 1, cex.lab = 1.2, cex.sub = 0.8, cex.main =1.4,
+        col = (c("salmon","lightgreen","lightblue")), names = (c("Lasso","OLS","PCA")))
+#Note = 10fold CV; Test RMSE
+RMSE_all_test <- cbind(RMSE_con_lasso_test, RMSE_con_ols_test, RMSE_con_pcr_test)
+boxplot(RMSE_all_test, ylab = "RMSE", xlab = "Models", main ="Fig. 2: Comparing RMSE Test Data",
+        cex.axis = 1, cex.lab = 1.2, cex.sub = 0.8, cex.main =1.4,
+        col = (c("salmon","lightgreen","lightblue")), names = (c("Lasso","OLS","PCA")))
+#Note = 10fold CV; Test Rsquared
+R2_all_test <- cbind(R2_con_lasso_test, R2_con_ols_test, R2_con_pcr_test)
+boxplot(R2_all_test, ylab = "Rsquared", xlab = "Models", main ="Fig. 3: Comparing Rsquared Test Data",
+        cex.axis = 1, cex.lab = 1.2, cex.sub = 0.8, cex.main =1.4,
+        col = (c("salmon","lightgreen","lightblue")), names = (c("Lasso","OLS","PCA")))
+```
+```{r Lasso_Selection}
+set.seed(50)
+crossValid <- trainControl(method = "cv", number = 10, savePredictions = "all")
+lambda_grid <- 10^seq(5, -5, length = 500)  
+lasso_mod <- train(Y ~ .,
+                   data = training_data,
+                   preProcess = c("center","scale"),
+                   method = "glmnet",
+                   tuneGrid = expand.grid(alpha=1,lambda = lambda_grid),
+                   trControl=crossValid) #trainControl= takes the cross validation from before which "folds" the training data
+plot(log(lasso_mod$results$lambda),
+     lasso_mod$results$RMSE,
+     xlab = "log(lambda)",
+     ylab = "RMSE",
+     xlim= c(-5,2),
+     type = "l",
+     col = "salmon",
+     lwd = 2,
+     main = "Fig. 4: RMSE across lambda")
+ggplot(varImp(lasso_mod)) #importance of variables in the variable selection
+ggplot(varImp(pcr_mod))
+```
+
+```{r k-fold_CV}
+rep = 10
+cv_it <- 10
+#run Simulation Study
+cv10 <- RMSE_container_lasso
+
+cv_it <- 5
+#run Simulation Study
+cv5 <- RMSE_container_lasso
+
+cv_it <- 3
+#run Simulation Study
+cv3 <- RMSE_container_lasso
+
+CV_comp<- cbind(cv10,cv5,cv3)
+boxplot(CV_comp, ylab = "RMSE", xlab = "Folds", main ="Fig. 7: Cross-Validation Comparison with LASSO",
+        cex.axis = 1, cex.lab = 1.2, cex.sub = 0.8, cex.main =1.4,
+        col = (c("yellow","violet","blue")), names = (c("10-fold","5-fold","3-fold")))
+
+```
+
+
+```{r realDataAppl_APPENDIX}
+#run set.seed(60) for the simulation to get the predictions results
+df_prework<- as.data.frame(df_prework)
+new_row <- data.frame(a4_mother_edu = NA, d12_husband_edu = NA, i11_total_inc = NA, score62 = NA, a3_grade = NA, b1_work_yn = NA, c6_mens_evrusepads = NA,
+                      c7_mens_userags = NA, c7_mens_usepads =NA, c7_mens_usepadsandrags =NA,father_hindu= NA, treatment = NA )
+try <- rbind(df_prework,new_row)
+try <- rbind(try,new_row)
+try[is.na(try)] <- 0
+test <- true_y 
+test <- append(test,0)
+test <- append(test,0)
+test[is.na(test)] <- 0
+
+#LASSO
+app_prediction_lasso <- predict(lasso_mod, newdata = try, na.action = na.pass, se = "TRUE") #predictions of y
+app_modeltest_lasso <- postResample(app_prediction_lasso, test)[-3]
+
+
+#OLS--
+#prediction_ols
+app_prediction_ols <- predict(ols_mod, newdata = try)
+app_modeltest_ols <- postResample(app_prediction_ols, test)[-3]
+
+#pcr--
+app_prediction_pcr <- predict(pcr_mod, newdata = try)
+app_modeltest_pcr <- postResample(app_prediction_pcr, test)[-3]
+
+RMSE_app<- cbind(app_modeltest_lasso[1],app_modeltest_ols[1],app_modeltest_pcr[1])
+Rsquared_app<- cbind(app_modeltest_lasso[2],app_modeltest_ols[2],app_modeltest_pcr[2])
+
+lasso_results <- c("LASSO",app_modeltest_lasso[1],app_modeltest_lasso[2])
+pls_results <- c("OLS",app_modeltest_ols[1],app_modeltest_ols[2])
+app_modeltest_pcr <- c("PCR",app_modeltest_pcr[1],app_modeltest_pcr[2])
+print(cbind(lasso_results,pls_results,app_modeltest_pcr))
+
+
+compare_models(lasso_mod,ols_mod, metric = "RMSE")
+compare_models(lasso_mod,ols_mod, metric = "Rsquared")
+
+compare_models(lasso_mod,pcr_mod, metric = "RMSE")
+compare_models(lasso_mod,pcr_mod, metric = "Rsquared")
+
+compare_models(pcr_mod,ols_mod, metric = "RMSE")
+compare_models(pcr_mod,ols_mod, metric = "Rsquared")
+
+
+
+```
+
+
+
+
+
+
